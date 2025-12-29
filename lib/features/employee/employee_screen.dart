@@ -75,7 +75,7 @@ class _EmployeeScreenState extends State<EmployeeScreen> {
     final XFile photo = await _controller!.takePicture();
     final File imageFile = File(photo.path);
 
-    final face = await _faceService.detectFace(imageFile);
+    final face = await _faceService.detectAndCrop(imageFile);
     if (face == null) {
       _show("No face detected. Try again.");
       return;

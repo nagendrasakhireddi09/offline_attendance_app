@@ -1,151 +1,4 @@
-// import 'dart:convert';
-// import 'dart:io';
-//
-// import 'package:camera/camera.dart';
-// import 'package:flutter/material.dart';
-//
-// import '../../core/db/db_helper.dart';
-// import '../../core/face/face_service.dart';
-// import '../../core/face/face_vector.dart';
-//
-// class RegisterEmployeeScreen extends StatefulWidget {
-//   const RegisterEmployeeScreen({super.key});
-//
-//   @override
-//   State<RegisterEmployeeScreen> createState() =>
-//       _RegisterEmployeeScreenState();
-// }
-//
-// class _RegisterEmployeeScreenState extends State<RegisterEmployeeScreen> {
-//   final nameCtrl = TextEditingController();
-//   final mobileCtrl = TextEditingController();
-//   final passCtrl = TextEditingController();
-//   final _designationCtrl = TextEditingController();
-//
-//
-//   CameraController? controller;
-//   bool ready = false;
-//   bool captured = false;
-//
-//   final faceService = FaceService();
-//
-//   String? photoPath;
-//   String? faceVector;
-//
-//   @override
-//   void initState() {
-//     super.initState();
-//     _initCamera();
-//   }
-//
-//   Future<void> _initCamera() async {
-//     final cams = await availableCameras();
-//     controller = CameraController(
-//       cams.first,
-//       ResolutionPreset.medium,
-//       enableAudio: false,
-//     );
-//     await controller!.initialize();
-//     setState(() => ready = true);
-//   }
-//
-//   Future<void> capture() async {
-//     final pic = await controller!.takePicture();
-//     final file = File(pic.path);
-//
-//     final face = await faceService.detectFace(file);
-//     if (face == null) {
-//       _msg("No face detected");
-//       return;
-//     }
-//
-//     final vector = faceToVector(face);
-//
-//     setState(() {
-//       photoPath = file.path;
-//       faceVector = jsonEncode(vector);
-//       captured = true;
-//     });
-//
-//     _msg("Face captured");
-//   }
-//
-//   Future<void> save() async {
-//     if (!captured) {
-//       _msg("Capture face first");
-//       return;
-//     }
-//
-//     await DBHelper.instance.insertEmployeeFull(
-//       name: nameCtrl.text,
-//       designation: _designationCtrl.text,
-//       mobile: mobileCtrl.text,
-//       userId: mobileCtrl.text,
-//       password: passCtrl.text,
-//       role: "EMPLOYEE",
-//       faceEmbedding: faceVector!,
-//       photoPath: photoPath!,
-//     );
-//
-//     _msg("Employee registered successfully");
-//     Navigator.pop(context);
-//   }
-//
-//   void _msg(String s) {
-//     ScaffoldMessenger.of(context)
-//         .showSnackBar(SnackBar(content: Text(s)));
-//   }
-//
-//   @override
-//   void dispose() {
-//     controller?.dispose();
-//     faceService.dispose();
-//     super.dispose();
-//   }
-//
-//   @override
-//   Widget build(BuildContext context) {
-//     return Scaffold(
-//       appBar: AppBar(title: const Text("Register Employee")),
-//       body: !ready
-//           ? const Center(child: CircularProgressIndicator())
-//           : SingleChildScrollView(
-//         padding: const EdgeInsets.all(16),
-//         child: Column(
-//           children: [
-//             TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: "Name")),
-//             TextField(controller: _designationCtrl, decoration: const InputDecoration(labelText: "Designation")),
-//             TextField(controller: mobileCtrl, decoration: const InputDecoration(labelText: "Mobile")),
-//             TextField(controller: passCtrl, decoration: const InputDecoration(labelText: "Password"), obscureText: true),
-//             const SizedBox(height: 16),
-//
-//             SizedBox(
-//               height: 220,
-//               child: captured
-//                   ? Image.file(File(photoPath!), fit: BoxFit.cover)
-//                   : CameraPreview(controller!),
-//             ),
-//
-//             const SizedBox(height: 10),
-//
-//             captured
-//                 ? ElevatedButton(
-//               onPressed: () => setState(() => captured = false),
-//               child: const Text("Retake"),
-//             )
-//                 : ElevatedButton(
-//               onPressed: capture,
-//               child: const Text("Capture Face"),
-//             ),
-//
-//             const SizedBox(height: 20),
-//             ElevatedButton(onPressed: save, child: const Text("Register"))
-//           ],
-//         ),
-//       ),
-//     );
-//   }
-// }
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -154,7 +7,10 @@ import 'package:flutter/material.dart';
 
 import '../../core/db/db_helper.dart';
 import '../../core/face/face_service.dart';
-import '../../core/face/face_vector.dart';
+
+import '../../core/face/facenet_service.dart';
+import '../../core/face/image_utils.dart';
+
 
 class RegisterEmployeeScreen extends StatefulWidget {
   const RegisterEmployeeScreen({super.key});
@@ -170,58 +26,111 @@ class _RegisterEmployeeScreenState extends State<RegisterEmployeeScreen> {
   final passCtrl = TextEditingController();
   final designationCtrl = TextEditingController();
 
-  CameraController? controller;
-  bool ready = false;
-  bool captured = false;
+  CameraController? _cameraController;
+  bool _cameraReady = false;
+  bool _modelLoaded = false;
+  bool _captured = false;
+  bool _saving = false;
 
-  final faceService = FaceService();
+  final FaceService _faceService = FaceService();
+  final FaceNetService _faceNetService = FaceNetService();
 
-  String? photoPath;
-  String? faceVector;
+  String? _photoPath;
+  String? _faceEmbeddingJson;
 
+  // ---------------- INIT ----------------
   @override
   void initState() {
     super.initState();
     _initCamera();
+    _loadFaceModel();
   }
 
+  Future<void> _loadFaceModel() async {
+    try {
+      await _faceNetService.loadModel();
+      if (mounted) {
+        setState(() => _modelLoaded = true);
+      }
+    } catch (e) {
+      if (mounted) {
+        _msg("Failed to load face recognition model : $e");
+      }
+    }
+  }
+
+  // ---------------- CAMERA ----------------
   Future<void> _initCamera() async {
     final cams = await availableCameras();
-    controller = CameraController(
-      cams.first,
+    final cam = cams.firstWhere(
+          (c) => c.lensDirection == CameraLensDirection.front,
+      orElse: () => cams.first,
+    );
+
+    _cameraController = CameraController(
+      cam,
       ResolutionPreset.medium,
       enableAudio: false,
     );
-    await controller!.initialize();
-    setState(() => ready = true);
+
+    await _cameraController!.initialize();
+    if (mounted) setState(() => _cameraReady = true);
   }
 
-  Future<void> capture() async {
-    final pic = await controller!.takePicture();
-    final file = File(pic.path);
-
-    final face = await faceService.detectFace(file);
-    if (face == null) {
-      _msg("No face detected");
+  // ---------------- CAPTURE FACE ----------------
+  Future<void> captureFace() async {
+    if (!_cameraReady) {
+      _msg("Camera not ready");
       return;
     }
 
-    final vector = faceToVector(face);
-
-    setState(() {
-      photoPath = file.path;
-      faceVector = jsonEncode(vector);
-      captured = true;
-    });
-
-    _msg("Face captured successfully");
-  }
-
-  Future<void> save() async {
-    if (!captured) {
-      _msg("Please capture face first");
+    if (!_modelLoaded) {
+      _msg("Face recognition model is still loading. Please wait...");
       return;
     }
+
+    try {
+      final pic = await _cameraController!.takePicture();
+      final file = File(pic.path);
+
+      final face = await _faceService.detectAndCrop(file);
+      if (face == null) {
+        _msg("No face detected ❌");
+        return;
+      }
+
+      // Convert image → FaceNet input
+      final input = imageToFloat32(file);
+
+      // Generate FaceNet embedding
+      final embedding = _faceNetService.getEmbedding(input);
+
+      setState(() {
+        _photoPath = file.path;
+        _faceEmbeddingJson = jsonEncode(embedding);
+        _captured = true;
+      });
+
+      _msg("Face captured successfully ✅");
+    } catch (e) {
+      _msg("Error capturing face: $e");
+    }
+  }
+
+  // ---------------- SAVE EMPLOYEE ----------------
+  Future<void> saveEmployee() async {
+    if (_saving) return;
+
+    if (nameCtrl.text.isEmpty ||
+        mobileCtrl.text.isEmpty ||
+        passCtrl.text.isEmpty ||
+        designationCtrl.text.isEmpty ||
+        !_captured) {
+      _msg("Please fill all fields & capture face");
+      return;
+    }
+
+    setState(() => _saving = true);
 
     await DBHelper.instance.insertEmployeeFull(
       name: nameCtrl.text,
@@ -230,24 +139,18 @@ class _RegisterEmployeeScreenState extends State<RegisterEmployeeScreen> {
       userId: mobileCtrl.text,
       password: passCtrl.text,
       role: "EMPLOYEE",
-      faceEmbedding: faceVector!,
-      photoPath: photoPath!,
+      faceEmbedding: _faceEmbeddingJson!,
+      photoPath: _photoPath!,
     );
 
-    _msg("Employee registered successfully");
+    _msg("Employee registered successfully ✅");
     Navigator.pop(context);
   }
 
-  void _msg(String s) {
+  // ---------------- UI HELPERS ----------------
+  void _msg(String msg) {
     ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(s)));
-  }
-
-  @override
-  void dispose() {
-    controller?.dispose();
-    faceService.dispose();
-    super.dispose();
+        .showSnackBar(SnackBar(content: Text(msg)));
   }
 
   InputDecoration input(String label, IconData icon) {
@@ -264,38 +167,39 @@ class _RegisterEmployeeScreenState extends State<RegisterEmployeeScreen> {
   }
 
   @override
+  void dispose() {
+    _cameraController?.dispose();
+    _faceService.dispose();
+    _faceNetService.dispose();
+    super.dispose();
+  }
+
+  // ---------------- UI ----------------
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
-
-      /// Gradient AppBar
       appBar: AppBar(
         title: const Text("Register Employee"),
         elevation: 0,
         flexibleSpace: Container(
           decoration: const BoxDecoration(
             gradient: LinearGradient(
-              colors: [
-                Color(0xFF11998E),
-                Color(0xFF38EF7D),
-              ],
+              colors: [Color(0xFF11998E), Color(0xFF38EF7D)],
             ),
           ),
         ),
       ),
-
-      body: !ready
+      body: (!_cameraReady || !_modelLoaded)
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            /// Form Card
             Card(
               elevation: 6,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
+                  borderRadius: BorderRadius.circular(20)),
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Column(
@@ -325,84 +229,45 @@ class _RegisterEmployeeScreenState extends State<RegisterEmployeeScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 24),
-
-            /// Camera Preview
             Card(
               elevation: 6,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
+                  borderRadius: BorderRadius.circular(20)),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(20),
                 child: SizedBox(
                   height: 260,
                   width: double.infinity,
-                  child: captured
-                      ? Image.file(
-                    File(photoPath!),
-                    fit: BoxFit.cover,
-                  )
-                      : CameraPreview(controller!),
+                  child: _captured
+                      ? Image.file(File(_photoPath!), fit: BoxFit.cover)
+                      : CameraPreview(_cameraController!),
                 ),
               ),
             ),
-
             const SizedBox(height: 16),
-
-            /// Capture Button
-            captured
+            _captured
                 ? OutlinedButton.icon(
               onPressed: () =>
-                  setState(() => captured = false),
+                  setState(() => _captured = false),
               icon: const Icon(Icons.refresh),
               label: const Text("Retake Face"),
             )
                 : ElevatedButton.icon(
-              onPressed: capture,
+              onPressed: (_cameraReady && _modelLoaded) ? captureFace : null,
               icon: const Icon(Icons.camera_alt),
-              label: const Text("Capture Face"),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 24, vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
+              label: Text(_modelLoaded ? "Capture Face" : "Loading model..."),
             ),
-
             const SizedBox(height: 24),
-
-            /// Register Button
             SizedBox(
               width: double.infinity,
               height: 52,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [
-                      Color(0xFF6A11CB),
-                      Color(0xFF2575FC),
-                    ],
-                  ),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: ElevatedButton(
-                  onPressed: save,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.transparent,
-                    shadowColor: Colors.transparent,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: const Text(
-                    "REGISTER EMPLOYEE",
-                    style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold),
-                  ),
+              child: ElevatedButton(
+                onPressed: _saving ? null : saveEmployee,
+                child: Text(
+                  _saving ? "Saving..." : "REGISTER EMPLOYEE",
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold),
                 ),
               ),
             ),
@@ -412,4 +277,5 @@ class _RegisterEmployeeScreenState extends State<RegisterEmployeeScreen> {
     );
   }
 }
+
 

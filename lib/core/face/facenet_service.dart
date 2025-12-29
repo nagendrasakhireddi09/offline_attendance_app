@@ -1,61 +1,68 @@
+import 'dart:math';
 import 'dart:typed_data';
-import 'package:image/image.dart' as img;
+
 import 'package:tflite_flutter/tflite_flutter.dart';
 
 class FaceNetService {
   static const int inputSize = 160;
   static const int embeddingSize = 128;
 
-  late Interpreter _interpreter;
+  Interpreter? _interpreter;
+  bool _loaded = false;
 
-  static final FaceNetService instance = FaceNetService._internal();
-
-  FaceNetService._internal();
-
+  // ---------------- LOAD MODEL ----------------
   Future<void> loadModel() async {
-    _interpreter = await Interpreter.fromAsset(
-      'assets/models/facenet.tflite',
-      options: InterpreterOptions()..threads = 4,
-    );
+    if (_loaded) return;
+
+    try {
+      _interpreter = await Interpreter.fromAsset(
+        'facenet.tflite',
+        options: InterpreterOptions()..threads = 4,
+      );
+      _loaded = true;
+      print("✅ FaceNet model loaded");
+    } catch (e) {
+      print("❌ FaceNet load failed: $e");
+      rethrow;
+    }
   }
 
-  List<double> getEmbedding(img.Image faceImage) {
-    final input = _preprocess(faceImage);
+  // ---------------- GET EMBEDDING ----------------
+  List<double> getEmbedding(Float32List input) {
+    if (!_loaded || _interpreter == null) {
+      throw Exception("FaceNet model not loaded");
+    }
+
     final output = List.generate(
       1,
           (_) => List.filled(embeddingSize, 0.0),
     );
 
-    _interpreter.run(input, output);
+    _interpreter!.run(
+      input.reshape([1, inputSize, inputSize, 3]),
+      output,
+    );
+
     return output.first;
   }
 
-  List<dynamic> _preprocess(img.Image image) {
-    final resized = img.copyResize(
-      image,
-      width: inputSize,
-      height: inputSize,
-    );
-
-    final buffer = Float32List(inputSize * inputSize * 3);
-    int index = 0;
-
-    for (int y = 0; y < inputSize; y++) {
-      for (int x = 0; x < inputSize; x++) {
-        final pixel = resized.getPixel(x, y);
-
-        // ✅ Correct way in image ^4.x
-        buffer[index++] = (pixel.r - 128) / 128;
-        buffer[index++] = (pixel.g - 128) / 128;
-        buffer[index++] = (pixel.b - 128) / 128;
-      }
+  // ---------------- EUCLIDEAN DISTANCE ----------------
+  double calculateDistance(
+      List<double> a,
+      List<double> b,
+      ) {
+    double sum = 0;
+    for (int i = 0; i < a.length; i++) {
+      final diff = a[i] - b[i];
+      sum += diff * diff;
     }
-
-    return buffer.reshape([1, inputSize, inputSize, 3]);
+    return sqrt(sum);
   }
 
-
+  // ---------------- DISPOSE ----------------
   void dispose() {
-    _interpreter.close();
+    _interpreter?.close();
+    _interpreter = null;
+    _loaded = false;
   }
 }

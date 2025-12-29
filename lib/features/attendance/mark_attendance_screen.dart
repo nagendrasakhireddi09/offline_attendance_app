@@ -1,4 +1,3 @@
-
 import 'dart:convert';
 import 'dart:io';
 
@@ -8,9 +7,12 @@ import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/db/db_helper.dart';
-import '../../core/face/face_matcher.dart';
 import '../../core/face/face_service.dart';
-import '../../core/face/face_vector.dart';
+import '../../core/face/facenet_service.dart';
+import '../../core/face/image_utils.dart';
+
+
+
 
 class MarkAttendanceScreen extends StatefulWidget {
   final int employeeId;
@@ -31,19 +33,23 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
   bool _processing = false;
 
   final FaceService _faceService = FaceService();
+  final FaceNetService _faceNetService = FaceNetService();
 
   // ---------------- INIT ----------------
   @override
   void initState() {
     super.initState();
     _initCamera();
+    _loadModel();
   }
 
-  // ---------------- CAMERA INIT ----------------
+  Future<void> _loadModel() async {
+    await _faceNetService.loadModel();
+  }
+
+  // ---------------- CAMERA ----------------
   Future<void> _initCamera() async {
     final cameras = await availableCameras();
-
-    // Prefer FRONT camera
     final cam = cameras.firstWhere(
           (c) => c.lensDirection == CameraLensDirection.front,
       orElse: () => cameras.first,
@@ -56,10 +62,7 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
     );
 
     await _cameraController!.initialize();
-
-    if (mounted) {
-      setState(() => _cameraReady = true);
-    }
+    if (mounted) setState(() => _cameraReady = true);
   }
 
   // ---------------- MARK ATTENDANCE ----------------
@@ -73,41 +76,50 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
       final XFile pic = await _cameraController!.takePicture();
       final File imageFile = File(pic.path);
 
-      // 2️⃣ Detect face
-      final face = await _faceService.detectFace(imageFile);
+      // 2️⃣ Detect face (ML Kit)
+      final face = await _faceService.detectAndCrop(imageFile);
       if (face == null) {
         _show("No face detected ❌");
         return;
       }
 
-      // 3️⃣ Live face vector
-      final List<double> liveVector = faceToVector(face);
+      // 3️⃣ Convert image → FaceNet input
+      final input = imageToFloat32(imageFile);
 
-      // 4️⃣ Get employee
-      final emp = await DBHelper.instance
-          .getEmployeeById(widget.employeeId);
+      // 4️⃣ Generate LIVE FaceNet embedding
+      final List<double> liveEmbedding =
+      _faceNetService.getEmbedding(input);
 
-      if (emp == null || emp['faceEmbedding'] == null || emp['faceEmbedding'].toString().isEmpty) {
+      // 5️⃣ Get employee
+      final emp =
+      await DBHelper.instance.getEmployeeById(widget.employeeId);
+
+      if (emp == null ||
+          emp['faceEmbedding'] == null ||
+          emp['faceEmbedding'].toString().isEmpty) {
         _show("Employee face data missing ❌");
         return;
       }
 
-      // 5️⃣ Decode stored vector
-      final List<double> storedVector =
+      // 6️⃣ Decode stored FaceNet embedding
+      final List<double> storedEmbedding =
       (jsonDecode(emp['faceEmbedding']) as List)
           .map((e) => (e as num).toDouble())
           .toList();
 
-      // 6️⃣ Face match
-      final bool matched =
-      isFaceMatched(storedVector, liveVector);
+      // 7️⃣ Match FaceNet embeddings
+      final double distance =
+      _faceNetService.calculateDistance(
+          storedEmbedding, liveEmbedding);
 
-      if (!matched) {
+      debugPrint("🧠 Face distance = $distance");
+
+      if (distance > 1.0) {
         _show("Face not matched ❌");
         return;
       }
 
-      // 7️⃣ Check duplicate attendance
+      // 8️⃣ Check duplicate attendance
       final today =
       DateFormat('yyyy-MM-dd').format(DateTime.now());
 
@@ -123,13 +135,11 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
         return;
       }
 
-      // 8️⃣ Get current location
+      // 9️⃣ Location validation (GLOBAL locations)
       final Position pos =
       await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+          desiredAccuracy: LocationAccuracy.high);
 
-      // 9️⃣ Validate against ALL admin locations
       final locations =
       await DBHelper.instance.getLocations();
 
@@ -158,7 +168,6 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
 
       // 🔟 Save attendance
       final now = DateTime.now();
-
       await DBHelper.instance.insertAttendance(
         widget.employeeId,
         today,
@@ -173,13 +182,10 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
     } catch (e) {
       _show("Error: $e");
     } finally {
-      if (mounted) {
-        setState(() => _processing = false);
-      }
+      if (mounted) setState(() => _processing = false);
     }
   }
 
-  // ---------------- UI HELPERS ----------------
   void _show(String msg) {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(msg)));
@@ -189,6 +195,7 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
   void dispose() {
     _cameraController?.dispose();
     _faceService.dispose();
+    _faceNetService.dispose();
     super.dispose();
   }
 
@@ -202,8 +209,8 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
           : Column(
         children: [
           Expanded(
-            child: CameraPreview(_cameraController!),
-          ),
+              child:
+              CameraPreview(_cameraController!)),
           Padding(
             padding: const EdgeInsets.all(16),
             child: SizedBox(
